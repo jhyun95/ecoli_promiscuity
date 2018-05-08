@@ -23,10 +23,13 @@ CATH_OUT_FILE = '../data/gene_groups_with_cath.csv'
 def main():
 #    print('MAPPING ENZYMES TO CATH DOMAINS')
 #    map_enzymes_to_cath()
-    visualize_cath_hierarchy(depth=5)
+    visualize_cath_hierarchy(depth=4)
     
 def visualize_cath_hierarchy(gene_groups_file=CATH_OUT_FILE, depth=4):
-    ''' TODO '''
+    ''' Plots the CATH domain hierarchy for enzymes with CATH annotations.
+        Redder nodes = associated with more promiscuous enzymes,
+        Bluer nodes = associated with more specific enzymes, 
+        Node labels = number of enzymes mapped to the node '''
     
     ''' Loads enzmye CATH annotations '''
     print('Loading CATH annotations...')
@@ -47,10 +50,10 @@ def visualize_cath_hierarchy(gene_groups_file=CATH_OUT_FILE, depth=4):
     
     ''' Construct CATH hierarchy and assign enzymes to nodes '''
     print('Constructing CATH hierarchy graph...')
-    enz_ordered = list(enz_to_cath.keys()) # order enzymes for index IDs to save memory
+    enz_order = list(enz_to_cath.keys()) # order enzymes for index IDs to save memory
     cath_graph = {'ROOT':[]}; cath_node_to_enz = {'ROOT':set()}
     for enz in enz_to_cath:
-        enzID = enz_ordered.index(enz)
+        enzID = enz_order.index(enz)
         cath_classes = enz_to_cath[enz]
         for cath in cath_classes:
             for i in range(depth-1):
@@ -89,15 +92,28 @@ def visualize_cath_hierarchy(gene_groups_file=CATH_OUT_FILE, depth=4):
     
     ''' Generate graph visualization '''
     G = nx.from_scipy_sparse_matrix(adj)
-    nsize = 50
+    color_values = []; labels = {}
+    for i in range(n):
+        node = node_order[i]
+        enzymes = cath_node_to_enz[node]
+        count = len(enzymes); promiscuous = 0.0
+        for enzID in enzymes:
+            enz = enz_order[enzID]
+            promiscuous += int(enz_to_prom[enz] > 1)
+        color_values.append(promiscuous/count)
+        labels[i] = count
+    
+    nsize = 50; fsize = 8
     try: # if pygraphviz is available
         layout = nx.drawing.nx_agraph.graphviz_layout(G, prog='twopi')
-        nx.draw(G, pos=layout, node_size=nsize)
-#                with_labels=True, labels=labels)    
+        nx.draw(G, pos=layout, node_size=nsize, 
+                cmap=plt.get_cmap('coolwarm'), node_color=color_values,
+                with_labels=True, labels=labels, font_size=fsize)    
     except ImportError:
         print('No pygraphviz, using spring layout')
-        nx.draw_spring(G, node_size=nsize)    
-
+        nx.draw_spring(G, node_size=nsize,
+                       cmap=plt.get_cmap('coolwarm'), node_color=color_values,
+                       with_labels=True, labels=labels, font_size=fsize)  
     
 def map_enzymes_to_cath(gene_group_file=GENE_GROUPS_FILE, 
                         gem_pro_file=GEMPRO_FILE,
