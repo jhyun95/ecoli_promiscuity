@@ -5,21 +5,104 @@ Created on Mon May  7 19:01:48 2018
 @author: jhyun_000
 """
 
+import scipy.sparse
 import pandas as pd
 import matplotlib.pyplot as plt
+import networkx as nx
+# For viz, needs pygraphviz
+# https://stackoverflow.com/questions/40528048/pip-install-pygraphviz-no-package-libcgraph-found
+# pip install pygraphviz --install-option="--include-path=/usr/include/graphviz" 
+# --install-option="--library-path=/usr/lib/graphviz/"
 
 MODEL_FILE = '../data/iML1515.json'
 GEMPRO_FILE = '../data/iML1515-GEMPro.csv'
 CATH_FILE = '../data/cath-domain-list.txt'
 GENE_GROUPS_FILE = '../data/gene_groups_no_transport.csv'
+CATH_OUT_FILE = '../data/gene_groups_with_cath.csv'
 
 def main():
-    print('MAPPING ENZYMES TO CATH DOMAINS')
-    enz_to_cath, enz_to_cath_incomplete, cath_data = map_enzymes_to_cath()
+#    print('MAPPING ENZYMES TO CATH DOMAINS')
+#    map_enzymes_to_cath()
+    visualize_cath_hierarchy(depth=5)
+    
+def visualize_cath_hierarchy(gene_groups_file=CATH_OUT_FILE, depth=4):
+    ''' TODO '''
+    
+    ''' Loads enzmye CATH annotations '''
+    print('Loading CATH annotations...')
+    df = pd.read_csv(gene_groups_file)
+    enz_to_cath = {}; enz_to_prom = {}
+    rows, cols = df.shape
+    for i in range(rows):
+        gene_group = tuple(df.loc[i]['gene_group'].split(';'))
+        promiscuity = len(df.loc[i]['associated_reactions'].split(';'))
+        enz_to_prom[gene_group] = promiscuity
+        cath_classes = df.loc[i]['associated_cath_classes']
+        if not pd.isnull(cath_classes):
+            cath_classes = cath_classes.split(';')
+            cath_classes = map(lambda x: '.'.join(x.split('.')[:depth]), cath_classes)
+            cath_classes = tuple(cath_classes)
+            enz_to_cath[gene_group] = cath_classes
+    print('    Loaded annotations for', len(enz_to_cath), 'enzymes.')
+    
+    ''' Construct CATH hierarchy and assign enzymes to nodes '''
+    print('Constructing CATH hierarchy graph...')
+    enz_ordered = list(enz_to_cath.keys()) # order enzymes for index IDs to save memory
+    cath_graph = {'ROOT':[]}; cath_node_to_enz = {'ROOT':set()}
+    for enz in enz_to_cath:
+        enzID = enz_ordered.index(enz)
+        cath_classes = enz_to_cath[enz]
+        for cath in cath_classes:
+            for i in range(depth-1):
+                hierarchy = cath.split('.')
+                parent = '.'.join(hierarchy[:i+1])
+                child = '.'.join(hierarchy[:i+2])
+                # Update enzymes assigned to each node
+                if not parent in cath_node_to_enz:
+                    cath_node_to_enz[parent] = set()
+                if not child in cath_node_to_enz:
+                    cath_node_to_enz[child] = set()
+                cath_node_to_enz['ROOT'].add(enzID)
+                cath_node_to_enz[parent].add(enzID)
+                cath_node_to_enz[child].add(enzID)
+                # Update graph connections
+                if i == 0 and not parent in cath_graph['ROOT']: # highest level
+                    cath_graph['ROOT'].append(parent)
+                if not parent in cath_graph:
+                    cath_graph[parent] = [child]
+                elif not child in cath_graph[parent]:
+                    cath_graph[parent].append(child)
+                if not child in cath_graph:
+                    cath_graph[child] = []
+    print('    Constructed graph with', len(cath_graph), 'nodes.')
+    
+    ''' Convert adjancency list to sparse matrix '''
+    print('Constructing adjacency matrix...')
+    n = len(cath_graph)
+    adj = scipy.sparse.lil_matrix((n,n))
+    node_order = list(cath_graph.keys())
+    for i in range(n):
+        parent = node_order[i]
+        for child in cath_graph[parent]:
+            j = node_order.index(child)
+            adj[i,j] = 1; adj[j,i] = 1 # undirected
+    
+    ''' Generate graph visualization '''
+    G = nx.from_scipy_sparse_matrix(adj)
+    nsize = 50
+    try: # if pygraphviz is available
+        layout = nx.drawing.nx_agraph.graphviz_layout(G, prog='twopi')
+        nx.draw(G, pos=layout, node_size=nsize)
+#                with_labels=True, labels=labels)    
+    except ImportError:
+        print('No pygraphviz, using spring layout')
+        nx.draw_spring(G, node_size=nsize)    
+
     
 def map_enzymes_to_cath(gene_group_file=GENE_GROUPS_FILE, 
                         gem_pro_file=GEMPRO_FILE,
-                        cath_file=CATH_FILE):
+                        cath_file=CATH_FILE,
+                        cath_output_file=CATH_OUT_FILE):
     ''' Maps enzymes (as a list of genes) to a set of CATH domains. Separates 
         into complete (all genes in group have PDBs and all PDBs have CATH 
         domains) to incomplete (incomplete gene -> PDB or PDB -> CATH). '''
@@ -34,7 +117,7 @@ def map_enzymes_to_cath(gene_group_file=GENE_GROUPS_FILE,
         for pdb in pdbs:
             if pdb in pdb_to_cath:
                 cath = pdb_to_cath[pdb]
-                cath_domains.append(cath)
+                cath_domains += cath
             else:
                 is_complete = False
         if is_complete and len(cath_domains) > 0:
@@ -51,6 +134,24 @@ def map_enzymes_to_cath(gene_group_file=GENE_GROUPS_FILE,
     print('Enzymes with complete CATH domain annotation:', complete)
     print('Enzymes with partial CATH domain annotation:', incomplete)
     print('Enzymes with no CATH domain annotation:', absent)
+    
+    if cath_output_file: # integrate with gene groups file
+        df = pd.read_csv(gene_group_file)
+        df.rename(columns={'Unnamed: 0':''}, inplace=True)
+        rows, cols = df.shape
+        pdb_mapping = []; cath_mapping = []; cath_code_mapping = []
+        for i in range(rows):
+            gg = tuple(df.loc[i]['gene_group'].split(';'))
+            pdbs = enz_to_pdb[gg] if gg in enz_to_pdb else []
+            caths = enz_to_cath[gg] if gg in enz_to_cath else []
+            cath_codes = map(lambda x: cath_data[x], caths)
+            pdbs = ';'.join(pdbs); pdb_mapping.append(pdbs)
+            caths = ';'.join(caths); cath_mapping.append(caths)
+            cath_codes = ';'.join(cath_codes); cath_code_mapping.append(cath_codes)
+        df['associated_pdb'] = pdb_mapping
+        df['associated_cath_classes'] = cath_code_mapping
+        df['associated_cath_domains'] = cath_mapping
+        df.to_csv(cath_output_file, index=False)
     return enz_to_cath, enz_to_cath_incomplete, cath_data
     
 def map_enzymes_to_pdb(gene_group_file=GENE_GROUPS_FILE, gem_pro_file=GEMPRO_FILE):
@@ -99,10 +200,9 @@ def get_pdb_to_cath(pdbs, cath_file=CATH_FILE):
                 if not domain_pdb in pdb_to_cath:
                     pdb_to_cath[domain_pdb] = []
                 pdb_to_cath[domain_pdb].append(domain)
-                for i in range(len(data)-1): # classes are integers
-                    data[i] = int(data[i]) 
-                data[-1] = float(data[i]) # resolution is float
-                cath_data[domain] = data
+                cath_class = '.'.join(data[:-1])
+#                cath_res = float(data[-1])
+                cath_data[domain] = cath_class
     print('PDBs with CATH domains:', len(pdb_to_cath))
     print('Total CATH domains loaded:', len(cath_data))
     return pdb_to_cath, cath_data
