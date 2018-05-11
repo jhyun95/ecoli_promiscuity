@@ -6,7 +6,9 @@ Created on Mon May  7 19:01:48 2018
 """
 
 import scipy.sparse
+import numpy as np 
 import pandas as pd
+import seaborn as sns
 import matplotlib.pyplot as plt
 import networkx as nx
 # For viz, needs pygraphviz
@@ -19,11 +21,68 @@ GEMPRO_FILE = '../data/iML1515-GEMPro.csv'
 CATH_FILE = '../data/cath-domain-list.txt'
 GENE_GROUPS_FILE = '../data/gene_groups_no_transport.csv'
 CATH_OUT_FILE = '../data/gene_groups_with_cath.csv'
+SIMILARITY_OUT_FILE = '../data/domain_similarity.csv'
 
 def main():
 #    print('MAPPING ENZYMES TO CATH DOMAINS')
 #    map_enzymes_to_cath()
-    visualize_cath_hierarchy(depth=4)
+#    visualize_cath_hierarchy(depth=4)
+#    compute_enzyme_similarities_from_domains(depth=6)
+    df = pd.read_csv(SIMILARITY_OUT_FILE, header=0, index_col=0)
+    sns.heatmap(df.values)
+    
+def compute_enzyme_similarities_from_domains(depth=6, gene_groups_file=CATH_OUT_FILE,
+                                             similarity_out_file=SIMILARITY_OUT_FILE):
+    ''' Compute pairwise similarities of enzymes on the basis of
+        CATH domains they contain and the CATH hierarchy. '''
+    print('Computing pairwise domain-based similarities...')
+    enz_to_cath, enz_to_prom, enz_to_ID = \
+        get_enzyme_cath_annotations(gene_groups_file)
+    n = len(enz_to_cath)
+    enzyme_similarities = np.zeros((n,n))
+    enzymes = list(enz_to_cath.keys())
+    labels = []
+    for i in range(n):
+        labels.append(enz_to_ID[enzymes[i]])
+        enzyme_similarities[i,i] = 1.0
+        for j in range(i):
+            domains1 = enz_to_cath[enzymes[i]]
+            domains2 = enz_to_cath[enzymes[j]]
+            sim = compute_domain_similarity(domains1, domains2)
+            enzyme_similarities[i,j] = sim
+            enzyme_similarities[j,i] = sim
+    
+    if similarity_out_file != None:
+        df = pd.DataFrame(data=enzyme_similarities, index=labels, columns=labels)
+        df.to_csv(similarity_out_file)
+    return df
+        
+def compute_domain_similarity(domains1, domains2, domain_size_dict=None):
+    ''' Compute similarity between two enzymes on the basis
+        of which CATH domains they contain. If domain_size_dict
+        is provided, integrates relative sizes when looking at pairwise
+        domain similarities (otherwise, just uses CATH hierarchy, comparing
+        distance when looking with the specified depth) '''
+    n1 = len(domains1); n2 = len(domains2)
+    ''' Compute pairwise similarities between individual domains'''
+    domain_similarities = np.zeros((n1,n2))
+    for i in range(n1):
+        d1 = domains1[i].split('.'); depth = len(d1)
+        for j in range(n2):
+            d2 = domains2[j].split('.')
+            cath_same = map(lambda x: d1[x] == d2[x], range(len(d1)))
+            cath_diff = max(0, depth - sum(cath_same))
+            similarity = np.exp(-1.0 * cath_diff)
+            if domain_size_dict != None:
+                size1 = domain_size_dict[domains1[i]]
+                size2 = domain_size_dict[domains2[j]]
+                similarity *= np.min(size1,size2) / np.max(size1,size2)
+            domain_similarities[i][j] = similarity
+            
+    ''' Aggregate domain similarities into overall enzyme similarity '''
+    score = np.sum(np.amax(domain_similarities, axis=0)) / (2*n2)
+    score += np.sum(np.amax(domain_similarities, axis=1)) / (2*n1)
+    return score
     
 def visualize_cath_hierarchy(gene_groups_file=CATH_OUT_FILE, depth=4):
     ''' Plots the CATH domain hierarchy for enzymes with CATH annotations.
@@ -31,21 +90,10 @@ def visualize_cath_hierarchy(gene_groups_file=CATH_OUT_FILE, depth=4):
         Bluer nodes = associated with more specific enzymes, 
         Node labels = number of enzymes mapped to the node '''
     
-    ''' Loads enzmye CATH annotations '''
-    print('Loading CATH annotations...')
-    df = pd.read_csv(gene_groups_file)
-    enz_to_cath = {}; enz_to_prom = {}
-    rows, cols = df.shape
-    for i in range(rows):
-        gene_group = tuple(df.loc[i]['gene_group'].split(';'))
-        promiscuity = len(df.loc[i]['associated_reactions'].split(';'))
-        enz_to_prom[gene_group] = promiscuity
-        cath_classes = df.loc[i]['associated_cath_classes']
-        if not pd.isnull(cath_classes):
-            cath_classes = cath_classes.split(';')
-            cath_classes = map(lambda x: '.'.join(x.split('.')[:depth]), cath_classes)
-            cath_classes = tuple(cath_classes)
-            enz_to_cath[gene_group] = cath_classes
+    ''' Loads enzyme CATH annotations '''
+    print('Loading enzmye promiscuity and CATH annotations...')
+    enz_to_cath, enz_to_prom, enz_to_ID = \
+        get_enzyme_cath_annotations(gene_groups_file, depth=depth)
     print('    Loaded annotations for', len(enz_to_cath), 'enzymes.')
     
     ''' Construct CATH hierarchy and assign enzymes to nodes '''
@@ -114,6 +162,33 @@ def visualize_cath_hierarchy(gene_groups_file=CATH_OUT_FILE, depth=4):
         nx.draw_spring(G, node_size=nsize,
                        cmap=plt.get_cmap('coolwarm'), node_color=color_values,
                        with_labels=True, labels=labels, font_size=fsize)  
+        
+    ''' Cluster size distribution '''
+#    plt.figure()
+#    cluster_sizes = np.array(list(labels.values()))
+#    cluster_sizes = np.log(cluster_sizes)
+#    limit = round(max(cluster_sizes)) + 1
+#    plt.hist(cluster_sizes, bins=np.arange(0,limit,0.1))
+    
+def get_enzyme_cath_annotations(gene_groups_file=CATH_OUT_FILE, depth=6):
+    ''' Create two dictionaries, one mapping gene groups to CATH
+        annotations, and another mapping gene groups to promiscuity '''
+    df = pd.read_csv(gene_groups_file)
+    enz_to_cath = {}; enz_to_prom = {}; enz_to_ID = {}
+    rows, cols = df.shape
+    for i in range(rows):
+        ID = df.loc[i]['Unnamed: 0']
+        gene_group = tuple(df.loc[i]['gene_group'].split(';'))
+        promiscuity = len(df.loc[i]['associated_reactions'].split(';'))
+        enz_to_prom[gene_group] = promiscuity
+        enz_to_ID[gene_group] = ID
+        cath_classes = df.loc[i]['associated_cath_classes']
+        if not pd.isnull(cath_classes):
+            cath_classes = cath_classes.split(';')
+            cath_classes = map(lambda x: '.'.join(x.split('.')[:depth]), cath_classes)
+            cath_classes = tuple(cath_classes)
+            enz_to_cath[gene_group] = cath_classes
+    return enz_to_cath, enz_to_cath, enz_to_ID
     
 def map_enzymes_to_cath(gene_group_file=GENE_GROUPS_FILE, 
                         gem_pro_file=GEMPRO_FILE,
