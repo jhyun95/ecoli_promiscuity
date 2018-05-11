@@ -55,7 +55,7 @@ def main():
     
     ''' Heatmap visualization of Jaccard distances with hierarchical clustering '''
     print('Running heatmap visualization + clustering...')
-    hierarchical_distance_matrix(distances, promiscuity_colors, 'average')
+    hierarchical_distance_heatmap(distances, promiscuity_colors, 'average')
     
     ''' Comparing clusterings of 6 different approaches via Rand Index'''
     print('Comparing clustering approaches...')
@@ -191,7 +191,7 @@ def compare_clusterings(distances, hier_clusters=13):
     ax.set_title('Rand Indexes between different clustering methods')
     plt.tight_layout()
     
-def hierarchical_distance_matrix(distances, colors, method):
+def hierarchical_distance_heatmap(distances, method):
     ''' Visualize a distance matrix using a heatmap + hiearchical 
         clustering (distance method and metric can be specified) '''
     X = ssd.squareform(distances)
@@ -205,7 +205,7 @@ def hierarchical_distance_matrix(distances, colors, method):
     distances_clustered = distances_clustered[:, row_order]
     sns.heatmap(distances_clustered, xticklabels=False, yticklabels=False, ax=ax1)
     ax1.set_xlabel('Enzyme'); ax1.set_ylabel('Enzyme')
-    title = 'Hiearchical clustering of Jaccard distances (' + method + ')'
+    title = 'Hiearchical clustering of distances (' + method + ')'
     fig.suptitle(title); fig.tight_layout()
     fig.subplots_adjust(top=0.9)
     

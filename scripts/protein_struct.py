@@ -11,7 +11,9 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 import networkx as nx
-# For viz, needs pygraphviz
+
+from promiscuity import hierarchical_distance_heatmap
+# For hierarchical viz, needs pygraphviz
 # https://stackoverflow.com/questions/40528048/pip-install-pygraphviz-no-package-libcgraph-found
 # pip install pygraphviz --install-option="--include-path=/usr/include/graphviz" 
 # --install-option="--library-path=/usr/lib/graphviz/"
@@ -29,7 +31,8 @@ def main():
 #    visualize_cath_hierarchy(depth=4)
 #    compute_enzyme_similarities_from_domains(depth=6)
     df = pd.read_csv(SIMILARITY_OUT_FILE, header=0, index_col=0)
-    sns.heatmap(df.values)
+    hierarchical_distance_heatmap(1.0 - df.values, method='average')
+#    sns.heatmap(df.values)
     
 def compute_enzyme_similarities_from_domains(depth=6, gene_groups_file=CATH_OUT_FILE,
                                              similarity_out_file=SIMILARITY_OUT_FILE):
