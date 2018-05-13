@@ -5,7 +5,7 @@ Created on Mon May  7 19:01:48 2018
 @author: jhyun_000
 """
 
-import scipy.sparse
+import scipy.sparse, scipy.stats
 import numpy as np 
 import pandas as pd
 import seaborn as sns
@@ -29,10 +29,60 @@ def main():
 #    print('MAPPING ENZYMES TO CATH DOMAINS')
 #    map_enzymes_to_cath()
 #    visualize_cath_hierarchy(depth=4)
+    
+    ''' Visualize domain-based pairwise enzyme similarities '''
 #    compute_enzyme_similarities_from_domains(depth=6)
-    df = pd.read_csv(SIMILARITY_OUT_FILE, header=0, index_col=0)
-    hierarchical_distance_heatmap(1.0 - df.values, method='average')
+#    df = pd.read_csv(SIMILARITY_OUT_FILE, header=0, index_col=0)
+#    hierarchical_distance_heatmap(1.0 - df.values, method='average')
 #    sns.heatmap(df.values)
+    
+    ''' Test for domain-promiscuity associations '''
+    test_domain_classes(10,6,0.05)
+
+def test_domain_classes(min_class_size=10, depth=6, alpha=0.05,
+                        gene_groups_file=CATH_OUT_FILE):
+    enz_to_cath, enz_to_prom, enz_to_ID = \
+        get_enzyme_cath_annotations(gene_groups_file)
+    
+    ''' Create CATH classes '''
+    print('Loading CATH classes up to depth', str(depth) + ':')
+    cath_classes = {}; total_promiscuous = 0; total_specific = 0
+    for enz in enz_to_cath:
+        is_promiscuous = int(enz_to_prom[enz] > 1)
+        total_promiscuous += is_promiscuous
+        total_specific += (1 - is_promiscuous)
+        for cath in enz_to_cath[enz]:
+            data = cath.split('.')[:depth]
+            for i in range(len(data)): 
+                cath_class = '.'.join(data[:i+1])
+                if not cath_class in cath_classes:
+#                    print(cath_class)
+                    cath_classes[cath_class] = [set(), set()]
+                cath_classes[cath_class][1-is_promiscuous].add(enz)
+    
+    ''' Extract CATH classes that meet minimum size '''
+    large_classes = []
+    for cath_class in cath_classes:
+        num_enzymes = len(cath_classes[cath_class][0]) +  len(cath_classes[cath_class][1])
+        if num_enzymes >= min_class_size:
+            large_classes.append(cath_class)
+    print('    Number of CATH classes:', len(cath_classes))
+    print('    Number of CATH classes with size >=' + str(min_class_size) + ':', len(large_classes))
+    
+    ''' Apply Fisher's exact test to all classes of sufficient size
+        a = promiscuous and in class;     b = specific and in class 
+        c = promiscuous and not in class; c = specific and not in class '''
+    print('Applying Fisher\'s exact test with threshold', alpha)
+    for cath_class in large_classes:
+        a = len(cath_classes[cath_class][0])
+        b = len(cath_classes[cath_class][1])
+        c = total_promiscuous - a
+        d = total_specific - b
+        contingency = [[a,b],[c,d]]
+        oddsratio, pvalue = scipy.stats.fisher_exact(contingency)
+        if pvalue <= alpha:
+            print(cath_class, pvalue, contingency)
+    
     
 def compute_enzyme_similarities_from_domains(depth=6, gene_groups_file=CATH_OUT_FILE,
                                              similarity_out_file=SIMILARITY_OUT_FILE):
@@ -174,8 +224,11 @@ def visualize_cath_hierarchy(gene_groups_file=CATH_OUT_FILE, depth=4):
 #    plt.hist(cluster_sizes, bins=np.arange(0,limit,0.1))
     
 def get_enzyme_cath_annotations(gene_groups_file=CATH_OUT_FILE, depth=6):
-    ''' Create two dictionaries, one mapping gene groups to CATH
-        annotations, and another mapping gene groups to promiscuity '''
+    ''' Create three dictionaries, one mapping gene groups to CATH
+        annotations, another mapping gene groups to promiscuity
+        (as a integer value, the number of reactions catalzyed by the 
+        gene group), and finally one mapping gene groups to ID in the 
+        gene groups file '''
     df = pd.read_csv(gene_groups_file)
     enz_to_cath = {}; enz_to_prom = {}; enz_to_ID = {}
     rows, cols = df.shape
@@ -191,7 +244,7 @@ def get_enzyme_cath_annotations(gene_groups_file=CATH_OUT_FILE, depth=6):
             cath_classes = map(lambda x: '.'.join(x.split('.')[:depth]), cath_classes)
             cath_classes = tuple(cath_classes)
             enz_to_cath[gene_group] = cath_classes
-    return enz_to_cath, enz_to_cath, enz_to_ID
+    return enz_to_cath, enz_to_prom, enz_to_ID
     
 def map_enzymes_to_cath(gene_group_file=GENE_GROUPS_FILE, 
                         gem_pro_file=GEMPRO_FILE,
