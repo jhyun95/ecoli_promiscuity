@@ -13,6 +13,9 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import networkx as nx
 
+import sklearn.model_selection, sklearn.metrics
+import sklearn.svm, sklearn.naive_bayes, sklearn.tree, sklearn.neighbors
+
 from promiscuity import hierarchical_distance_heatmap
 # For hierarchical viz, needs pygraphviz
 # https://stackoverflow.com/questions/40528048/pip-install-pygraphviz-no-package-libcgraph-found
@@ -28,14 +31,15 @@ SIMILARITY_OUT_FILE = '../data/domain_similarity.csv'
 DOMAIN_COUNTS_OUT_FILE = '../data/domain_counts.csv'
 
 def main():
-    ''' Use PDB codes from iML1515-GEMPro to get enzyme CATH domains '''
+    ''' Use PDB codes from iML1515-GEMPro to get enzyme CATH domains,
+        generates the CATH_OUT_FILE used for following analyses '''
 #    map_enzymes_to_cath()
     
     ''' Visualize how enzymes are distributed in CATH hierarchy '''
 #    visualize_cath_hierarchy(depth=4)
     
-    ''' Test for domain-promiscuity associations '''
-#    test_domain_classes(10,6,0.05)
+    ''' Fisher's exact test for domain-promiscuity associations '''
+    test_domain_classes(10,6,0.05); print('')
     
     ''' Visualize domain-based pairwise enzyme similarities '''
 #    compute_enzyme_similarities_from_domains(depth=6)
@@ -45,18 +49,74 @@ def main():
 
     ''' Compute domain-based encodings for enzymes '''
 #    df = compute_enzyme_domain_counts(CATH_OUT_FILE, 5, '../data/domain_counts_min5.csv')
-    benchmark_learning_from_domain_counts(CATH_OUT_FILE, 5)
+#    df = compute_enzyme_domain_counts(CATH_OUT_FILE, 10, None)
     
-def benchmark_learning_from_domain_counts(gene_groups_file=CATH_OUT_FILE, 
-                                          encoding_min_size=5):
-    ''' Extract promiscuity and domain count data '''
+    ''' Model selection between SVM, NB, DT, and kNN '''
+    model_comparison_domain_counts(CATH_OUT_FILE, encoding_min_size=5); print('')
+    
+    ''' PR/ROC curves for SVM model with rbf kernel '''
+    evalulate_domain_count_model(CATH_OUT_FILE)
+    
+def evalulate_domain_count_model(gene_groups_file=CATH_OUT_FILE,
+                                 classifier=sklearn.svm.SVC(kernel='rbf')):
+    ''' Evalutes an sklearn classifier with a Precision-Recall plot
+        and ROC curve. For SVM, manipulates the distance threshold 
+        from the SVM hyperplane to generate PR/ROC curves. Generates
+        curves for multiple domain encoding lengths. '''
+    enz_to_cath, enz_to_prom, enz_to_ID = \
+        get_enzyme_cath_annotations(gene_groups_file)
+    fig, ax = plt.subplots(1,2,figsize=(7,4)); ax1,ax2 = ax
+    ax1.set_title('Precision-Recall Curves')
+    ax1.set_xlabel('Recall'); ax2.set_ylabel('Precision')
+    ax2.set_title('ROC Curves')
+    ax2.set_xlabel('FPR'); ax2.set_ylabel('TPR')
+    
+    for encoding_min_size in [5,6,7,8,9]:
+        ''' Format data for sklearn supervised learning 
+            (see model_comparison_domain_counts for details) '''
+        domain_df = compute_enzyme_domain_counts( \
+            gene_groups_file, encoding_min_size, None)
+        X = domain_df.values; n,k = X.shape # data points
+        X = np.array(X > 0, dtype=np.int8) # mask for just if domain exists, not domain counts
+        y = np.zeros(n) # data labels
+        for i in range(n):
+            enzyme = domain_df.index[i]
+            prom = enz_to_prom[tuple(enzyme.split(';'))]
+            y[i] = prom > 1 # promiscuity = # reactions > 1
+            
+        ''' Create SVM (rbf) classifier from 80% dataset, test on 20% '''
+        X_train, X_test, y_train, y_test = \
+            sklearn.model_selection.train_test_split(X, y, test_size=0.2, random_state=0)
+        
+        classifier.fit(X_train, y_train)
+        y_score = classifier.decision_function(X_test)
+        
+        ''' Generate PR and ROC curves based on sweeping the hyperplane 
+            distance threshold for labeling '''
+        precision, recall, _ = sklearn.metrics.precision_recall_curve(y_test, y_score)
+        fpr, tpr, _ = sklearn.metrics.roc_curve(y_test, y_score)
+        label = 'MDCS=' + str(encoding_min_size)
+        ax1.plot(recall, precision, label=label)
+        ax2.plot(fpr, tpr, label=label) 
+    
+    ax2.plot([0,1],[0,1],'k-')
+    ax2.legend(loc='lower right')
+    plt.tight_layout()
+    
+def model_comparison_domain_counts(gene_groups_file=CATH_OUT_FILE, encoding_min_size=5):
+    ''' Evalulate SVM (linear kernel, rbf kernel), Naive Bayes, 
+        Decision Tree, and k-Nearest Neighbors (k=5-20) models 
+        for learning enzyme promiscuity from CATH domain encodings '''
     enz_to_cath, enz_to_prom, enz_to_ID = \
         get_enzyme_cath_annotations(gene_groups_file)
     domain_df = compute_enzyme_domain_counts( \
         gene_groups_file, encoding_min_size, None)
     
     ''' Format for sklearn supervised learning,
-        X = data points, y = data labels '''
+        X = data points, fixed-length bitstring corresponding to 
+            the presence or absence of domain classes in each enzyme
+        y = data labels, True/False for enzyme promiscuity, defined
+            as the number of reactions catalyzed > 1 in iML1515 '''
     X = domain_df.values; n,k = X.shape # data points
     X = np.array(X > 0, dtype=np.int8) # mask for just if domain exists, not domain counts
     y = np.zeros(n) # data labels
@@ -65,10 +125,26 @@ def benchmark_learning_from_domain_counts(gene_groups_file=CATH_OUT_FILE,
         prom = enz_to_prom[tuple(enzyme.split(';'))]
         y[i] = prom > 1 # promiscuity = # reactions > 1
     
-    # TODO: Apply SL methods
+    ''' Test SVM, NB, DT, and kNN '''
+    cv = 5 # cross validation fold
+    print("Supervised learning accuracies under 5-fold CV (+/- std)")
+    clf = sklearn.svm.SVC(kernel='linear')
+    scores = sklearn.model_selection.cross_val_score(clf, X, y, cv=cv)
+    print('SVM (linear) :', round(scores.mean(),3), '+/-', round(scores.std(),3))
+    clf = sklearn.svm.SVC(kernel='rbf')
+    scores = sklearn.model_selection.cross_val_score(clf, X, y, cv=cv)
+    print('SVM (rbf)    :', round(scores.mean(),3), '+/-', round(scores.std(),3))
+    clf = sklearn.naive_bayes.MultinomialNB()
+    scores = sklearn.model_selection.cross_val_score(clf, X, y, cv=cv)
+    print('Naive Bayes  :', round(scores.mean(),3), '+/-', round(scores.std(),3))
+    clf = sklearn.tree.DecisionTreeClassifier()
+    scores = sklearn.model_selection.cross_val_score(clf, X, y, cv=cv)
+    print('Decision Tree:', round(scores.mean(),3), '+/-', round(scores.std(),3))
+    for k in range(5,20):
+        clf = sklearn.neighbors.KNeighborsClassifier(n_neighbors=k, weights='distance')
+        scores = sklearn.model_selection.cross_val_score(clf, X, y, cv=cv)
+        print('kNN (k=' + str(k) + '):', round(scores.mean(),3), '+/-', round(scores.std(),3))
     
-                                          
-
 def test_domain_classes(min_class_size=10, depth=6, alpha=0.05,
                         gene_groups_file=CATH_OUT_FILE):
     ''' Statistical test (Fisher's exact) to test whether a domain
@@ -119,7 +195,7 @@ def compute_enzyme_domain_counts(gene_groups_file=CATH_OUT_FILE,
                                  encode_size_limit=10,
                                  out_file=DOMAIN_COUNTS_OUT_FILE):
     ''' Loads enzyme CATH annotations to full depth '''
-    print('Loading enzmye promiscuity and CATH annotations...')
+    print('Loading enzyme promiscuity and CATH annotations...')
     enz_to_cath, enz_to_prom, enz_to_ID = \
         get_enzyme_cath_annotations(gene_groups_file, depth=8)
     domains = set(reduce(lambda x,y: x+y, enz_to_cath.values()))
@@ -241,7 +317,7 @@ def visualize_cath_hierarchy(gene_groups_file=CATH_OUT_FILE, depth=4):
         Node labels = number of enzymes mapped to the node '''
     
     ''' Loads enzyme CATH annotations '''
-    print('Loading enzmye promiscuity and CATH annotations...')
+    print('Loading enzyme promiscuity and CATH annotations...')
     enz_to_cath, enz_to_prom, enz_to_ID = \
         get_enzyme_cath_annotations(gene_groups_file, depth=depth)
     print('    Loaded annotations for', len(enz_to_cath), 'enzymes.')
