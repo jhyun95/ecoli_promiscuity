@@ -5,6 +5,7 @@ Created on Mon May  7 19:01:48 2018
 @author: jhyun_000
 """
 
+from functools import reduce
 import scipy.sparse, scipy.stats
 import numpy as np 
 import pandas as pd
@@ -24,26 +25,57 @@ CATH_FILE = '../data/cath-domain-list.txt'
 GENE_GROUPS_FILE = '../data/gene_groups_no_transport.csv'
 CATH_OUT_FILE = '../data/gene_groups_with_cath.csv'
 SIMILARITY_OUT_FILE = '../data/domain_similarity.csv'
+DOMAIN_COUNTS_OUT_FILE = '../data/domain_counts.csv'
 
 def main():
-#    print('MAPPING ENZYMES TO CATH DOMAINS')
+    ''' Use PDB codes from iML1515-GEMPro to get enzyme CATH domains '''
 #    map_enzymes_to_cath()
+    
+    ''' Visualize how enzymes are distributed in CATH hierarchy '''
 #    visualize_cath_hierarchy(depth=4)
+    
+    ''' Test for domain-promiscuity associations '''
+#    test_domain_classes(10,6,0.05)
     
     ''' Visualize domain-based pairwise enzyme similarities '''
 #    compute_enzyme_similarities_from_domains(depth=6)
 #    df = pd.read_csv(SIMILARITY_OUT_FILE, header=0, index_col=0)
 #    hierarchical_distance_heatmap(1.0 - df.values, method='average')
 #    sns.heatmap(df.values)
+
+    ''' Compute domain-based encodings for enzymes '''
+#    df = compute_enzyme_domain_counts(CATH_OUT_FILE, 5, '../data/domain_counts_min5.csv')
+    benchmark_learning_from_domain_counts(CATH_OUT_FILE, 5)
     
-    ''' Test for domain-promiscuity associations '''
-    test_domain_classes(10,6,0.05)
+def benchmark_learning_from_domain_counts(gene_groups_file=CATH_OUT_FILE, 
+                                          encoding_min_size=5):
+    ''' Extract promiscuity and domain count data '''
+    enz_to_cath, enz_to_prom, enz_to_ID = \
+        get_enzyme_cath_annotations(gene_groups_file)
+    domain_df = compute_enzyme_domain_counts( \
+        gene_groups_file, encoding_min_size, None)
+    
+    ''' Format for sklearn supervised learning,
+        X = data points, y = data labels '''
+    X = domain_df.values; n,k = X.shape # data points
+    X = np.array(X > 0, dtype=np.int8) # mask for just if domain exists, not domain counts
+    y = np.zeros(n) # data labels
+    for i in range(n):
+        enzyme = domain_df.index[i]
+        prom = enz_to_prom[tuple(enzyme.split(';'))]
+        y[i] = prom > 1 # promiscuity = # reactions > 1
+    
+    # TODO: Apply SL methods
+    
+                                          
 
 def test_domain_classes(min_class_size=10, depth=6, alpha=0.05,
                         gene_groups_file=CATH_OUT_FILE):
+    ''' Statistical test (Fisher's exact) to test whether a domain
+        or domain class is associated with promiscuity of specificity '''
     enz_to_cath, enz_to_prom, enz_to_ID = \
         get_enzyme_cath_annotations(gene_groups_file)
-    
+        
     ''' Create CATH classes '''
     print('Loading CATH classes up to depth', str(depth) + ':')
     cath_classes = {}; total_promiscuous = 0; total_specific = 0
@@ -82,7 +114,72 @@ def test_domain_classes(min_class_size=10, depth=6, alpha=0.05,
         oddsratio, pvalue = scipy.stats.fisher_exact(contingency)
         if pvalue <= alpha:
             print(cath_class, pvalue, contingency)
+
+def compute_enzyme_domain_counts(gene_groups_file=CATH_OUT_FILE, 
+                                 encode_size_limit=10,
+                                 out_file=DOMAIN_COUNTS_OUT_FILE):
+    ''' Loads enzyme CATH annotations to full depth '''
+    print('Loading enzmye promiscuity and CATH annotations...')
+    enz_to_cath, enz_to_prom, enz_to_ID = \
+        get_enzyme_cath_annotations(gene_groups_file, depth=8)
+    domains = set(reduce(lambda x,y: x+y, enz_to_cath.values()))
+    print('    Loaded annotations for', len(enz_to_cath), 'enzymes.')
+    print('    Loaded total of', len(domains), 'CATH domains.')
     
+    ''' Construct CATH hierarchy and assign enzymes to nodes '''
+    cath_graph, cath_node_to_enz, adj, enz_order, node_order = \
+        compute_cath_hierarchy(enz_to_cath, depth=8)
+        
+    ''' Select all CATH classes of size above a threshold. Remove
+        CATH classes in which all of their children are included, 
+        to remove dependent values '''
+    large_classes = []
+    get_class_size = lambda x: len(cath_node_to_enz[x])
+    for cath_class in cath_graph:
+        if get_class_size(cath_class) >= encode_size_limit:
+            large_classes.append(cath_class)
+    filtered_classes = []
+    for cath_class in large_classes:
+        has_all_children = True
+        for child in cath_graph[cath_class]:
+            has_all_children = has_all_children and child in large_classes
+        if not has_all_children and cath_class != 'ROOT':
+            filtered_classes.append(cath_class)
+    print('Extracted', len(filtered_classes), 'CATH classes to encode.')
+    
+    ''' Use selected CATH classes to encode enzymes as fixed
+        length vectors based on domain information. '''
+    n = len(enz_to_cath) # number of enzymes
+    k = len(filtered_classes) # number of CATH classes to encode
+    encoding = np.zeros((n,k))
+    export_enz_order = list(enz_to_cath.keys())
+    for i in range(n):
+        enz = export_enz_order[i]
+        for j in range(k):
+            cath_class = filtered_classes[j]
+            for cath_domain in enz_to_cath[enz]:
+                if cath_class in cath_domain:
+                    encoding[i,j] += 1
+    
+    export_enz_order = map(lambda x: ';'.join(x), export_enz_order)
+    df = pd.DataFrame(data=encoding, index=export_enz_order, columns=filtered_classes)
+    if out_file != None:
+        df.to_csv(out_file)
+    return df
+    
+    ''' Greedy algorithm to select non-overlapping CATH classes 
+        that cover all CATH domains, such all classes are smaller than
+        the set threshold, and the fewest number of classes are required. 
+        NOTE: Selecting non-overlapping CATH classes gives too many classes! '''
+#    class_list = ['ROOT'] # start at root
+#    get_class_size = lambda x: len(cath_node_to_enz[x])
+#    largest_cluster = max(class_list, key=get_class_size)
+#    while get_class_size(largest_cluster) > max_encode_size: 
+#        ''' Iteratively divide replace largest class with its subclasses '''
+#        children_of_max = cath_graph[largest_cluster]
+#        class_list.remove(largest_cluster)
+#        class_list += children_of_max 
+#        largest_cluster = max(class_list, key=get_class_size)  
     
 def compute_enzyme_similarities_from_domains(depth=6, gene_groups_file=CATH_OUT_FILE,
                                              similarity_out_file=SIMILARITY_OUT_FILE):
@@ -150,6 +247,49 @@ def visualize_cath_hierarchy(gene_groups_file=CATH_OUT_FILE, depth=4):
     print('    Loaded annotations for', len(enz_to_cath), 'enzymes.')
     
     ''' Construct CATH hierarchy and assign enzymes to nodes '''
+    cath_graph, cath_node_to_enz, adj, enz_order, node_order = \
+        compute_cath_hierarchy(enz_to_cath, depth)
+    
+    ''' Generate graph visualization '''
+    G = nx.from_scipy_sparse_matrix(adj)
+    color_values = []; labels = {}
+    for i in range(len(cath_graph)):
+        node = node_order[i]
+        enzymes = cath_node_to_enz[node]
+        count = len(enzymes); promiscuous = 0.0
+        for enzID in enzymes:
+            enz = enz_order[enzID]
+            promiscuous += int(enz_to_prom[enz] > 1)
+        color_values.append(promiscuous/count)
+        labels[i] = count
+    
+    nsize = 50; fsize = 8
+    try: # if pygraphviz is available
+        layout = nx.drawing.nx_agraph.graphviz_layout(G, prog='twopi')
+        nx.draw(G, pos=layout, node_size=nsize, 
+                cmap=plt.get_cmap('coolwarm'), node_color=color_values,
+                with_labels=True, labels=labels, font_size=fsize)    
+    except ImportError:
+        print('No pygraphviz, using spring layout')
+        nx.draw_spring(G, node_size=nsize,
+                       cmap=plt.get_cmap('coolwarm'), node_color=color_values,
+                       with_labels=True, labels=labels, font_size=fsize)  
+        
+    ''' Cluster size distribution '''
+#    plt.figure()
+#    cluster_sizes = np.array(list(labels.values()))
+#    cluster_sizes = np.log(cluster_sizes)
+#    limit = round(max(cluster_sizes)) + 1
+#    plt.hist(cluster_sizes, bins=np.arange(0,limit,0.1))
+    
+def compute_cath_hierarchy(enz_to_cath, depth):
+    ''' Constructs CATH hierarchy and assign enzymes to nodes.
+        Returns 5 objects
+        - dictionary mapping CATH classes to their child classes
+        - dictionary mapping CATH classes to their enzymes (as IDs)
+        - the corresponding adjacency matrix
+        - enzyme list such that list[enzymeID] = enzyme 
+        - node list such that list[nodeID] = cath class  '''
     print('Constructing CATH hierarchy graph...')
     enz_order = list(enz_to_cath.keys()) # order enzymes for index IDs to save memory
     cath_graph = {'ROOT':[]}; cath_node_to_enz = {'ROOT':set()}
@@ -190,38 +330,7 @@ def visualize_cath_hierarchy(gene_groups_file=CATH_OUT_FILE, depth=4):
         for child in cath_graph[parent]:
             j = node_order.index(child)
             adj[i,j] = 1; adj[j,i] = 1 # undirected
-    
-    ''' Generate graph visualization '''
-    G = nx.from_scipy_sparse_matrix(adj)
-    color_values = []; labels = {}
-    for i in range(n):
-        node = node_order[i]
-        enzymes = cath_node_to_enz[node]
-        count = len(enzymes); promiscuous = 0.0
-        for enzID in enzymes:
-            enz = enz_order[enzID]
-            promiscuous += int(enz_to_prom[enz] > 1)
-        color_values.append(promiscuous/count)
-        labels[i] = count
-    
-    nsize = 50; fsize = 8
-    try: # if pygraphviz is available
-        layout = nx.drawing.nx_agraph.graphviz_layout(G, prog='twopi')
-        nx.draw(G, pos=layout, node_size=nsize, 
-                cmap=plt.get_cmap('coolwarm'), node_color=color_values,
-                with_labels=True, labels=labels, font_size=fsize)    
-    except ImportError:
-        print('No pygraphviz, using spring layout')
-        nx.draw_spring(G, node_size=nsize,
-                       cmap=plt.get_cmap('coolwarm'), node_color=color_values,
-                       with_labels=True, labels=labels, font_size=fsize)  
-        
-    ''' Cluster size distribution '''
-#    plt.figure()
-#    cluster_sizes = np.array(list(labels.values()))
-#    cluster_sizes = np.log(cluster_sizes)
-#    limit = round(max(cluster_sizes)) + 1
-#    plt.hist(cluster_sizes, bins=np.arange(0,limit,0.1))
+    return cath_graph, cath_node_to_enz, adj, enz_order, node_order
     
 def get_enzyme_cath_annotations(gene_groups_file=CATH_OUT_FILE, depth=6):
     ''' Create three dictionaries, one mapping gene groups to CATH
