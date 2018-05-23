@@ -9,8 +9,9 @@ Created on Tue May 22 16:03:54 2018
 import numpy as np
 import pandas as pd
 import torch
+import torch.optim as optim
 import torch.nn as nn
-from torch.autograd import Variable
+torch.set_num_threads(1)
 
 ''' Basic RNN architecture taken from: 
     https://pytorch.org/tutorials/intermediate/char_rnn_classification_tutorial.html '''
@@ -22,68 +23,127 @@ GENE_GROUPS_FILE = '../data/gene_groups_no_transport.csv'
 AA_CODES = 'GALMFWKQESPVCIYHRNDT'
 
 def main():
-#    print(sequence_to_tensor('EPNPAYETLMNAVKLVREQKVTF'))
-    enzyme_data = load_enzyme_sequences_and_promiscuity()
+    ''' Load sequences. Limit maximum sequence length for performance issues '''
+    enzyme_data = load_enzyme_sequences_and_promiscuity(len_limit=800)
     enzyme_data = list(enzyme_data.values())
     print('Loaded sequences for', len(enzyme_data), 'enzymes.')
-    model = SimpleRNN(len(AA_CODES), hidden_size=20, output_size=2)
-
-    criterion = nn.NLLLoss()
-    print('Initialized RNN model')
     
-    for i in range(10):
-        print("EPOCH", i+1)    
-        train_epoch_rnn(model, criterion, enzyme_data, split=0.9)
-        
-    torch.save(model.state_dict(), '../torch_models/SimpleRNN_E10')
-#    model = SimpleRNN(len(AA_CODES), hidden_size=20, output_size=2)
-#    model.load_state_dict(torch.load('../torch_models/SimpleRNN_E10'))
+    ''' Pytorch built in RNNs, set length limit to <= 800 '''
+    model = nn.LSTM(input_size=len(AA_CODES), hidden_size=2, num_layers=1)
+#    model = BinaryLSTM(input_size=len(AA_CODES), hidden_size=5)
+    train_epochs_lstm(model, enzyme_data, split=0.9, epochs=10)
+    name = 'LSTM_H2_E10'
+    torch.save(model.state_dict(), '../torch_models/'+name)
     
-def train_epoch_rnn(rnn, criterion, data, lr=0.005, split=0.9):
-    ''' Single epoch, splits into train/test, trains on all training data '''
-    indices = np.arange(len(data))
-    np.random.shuffle(indices)
-    train_size = int(len(data)*split)
-    train_set = indices[:train_size]
-    test_set = indices[train_size:]
+    ''' Simple RNN example, set length limit to <=1000 '''
+#    model = SimpleRNN(len(AA_CODES), hidden_size=5, output_size=2)
+#    print('Initialized RNN model')
+#    model = train_epochs_simple_rnn(model, enzyme_data, split=0.9)    
+#    name = 'SimpleRNN_H5_E10'
+#    torch.save(model.state_dict(), '../torch_models/'+name)
     
-    ''' Training steps '''
-    print('Training...')
-    current_loss = 0.0; count = 1
-    for i in train_set:
-        seq, prom = data[i] 
-        output, loss = train_rnn(rnn, criterion, seq, prom, lr)
-        current_loss += loss
-        if count % 50 == 0:
-            print('Trained', count, 'of', str(train_size)+'.', 
-                  'Average Loss:', current_loss.data[0] / count)
-        count += 1
+#    model.load_state_dict(torch.load('../torch_models/'+name))
+    
+def train_epochs_lstm(model, data, lr=0.05, split=0.9, epochs=10):
+    optimizer = optim.Adam(model.parameters(),lr=lr)
+    for epoch in range(1,epochs+1):
+        print("EPOCH", epoch)
+        ''' Per epoch, splits into train/test, trains on all training data '''
+        indices = np.arange(len(data))
+        np.random.shuffle(indices)
+        train_size = int(len(data)*split)
+        train_set = indices[:train_size]
+        test_set = indices[train_size:]
         
-    ''' Test steps '''
-    print('Testing...')
-    correct = 0; test_size = len(data) - train_size
-    for i in test_set:
-        seq, prom = data[i]
-        hidden = Variable(rnn.init_hidden())
-        seq_tensor = Variable(sequence_to_tensor(seq))
-        for j in range(len(seq)):
-            output, hidden = rnn.forward(seq_tensor[j], hidden)
-        prom_predict = output.max(1)[1].data[0]
-        correct += (int(prom) == prom_predict)
-    print('Accuracy:', correct, 'of', test_size, 
-          '(' + str(correct/test_size) + ')')
+        ''' Training steps '''
+        print('Training...'); model.train()
+        current_loss = 0.0; count = 1
         
-def train_rnn(rnn, criterion, sequence, is_promiscuous, lr=0.005):
-    ''' Single training step for RNN '''
+        for i in train_set:
+            seq, prom = data[i] 
+            seq_tensor = sequence_to_tensor(seq)
+            output, hidden = model(seq_tensor)
+                
+            optimizer.zero_grad()
+            prom_tensor = torch.LongTensor([int(prom)])
+            last_output = output[-1] # for nn.LSTM
+#            last_output = output # for BinaryLSTM
+#            loss = nn.functional.nll_loss(last_output, prom_tensor) # NLL loss is negative? bug
+            loss = nn.functional.cross_entropy(last_output, prom_tensor)
+            loss.backward()
+            current_loss += loss
+            optimizer.step()
+            
+            if count % 50 == 0:
+                print('Trained', count, 'of', str(train_size)+'.', 
+                      'Average Loss:', current_loss.item() / count)
+            count += 1
+            
+        ''' Test steps '''
+        print('Testing...'); model.eval()
+        correct = 0; test_size = len(data) - train_size
+        for i in test_set:
+            seq, prom = data[i]
+            seq_tensor = sequence_to_tensor(seq)
+            output, hidden = model(seq_tensor)
+            prom_predict = output[-1].max(1)[1].item() # for nn.LSTM
+#            prom_predict = output.max(1)[1].item() # for BinaryLSTM
+            correct += (int(prom) == prom_predict)
+        print('Accuracy:', correct, 'of', test_size, 
+              '(' + str(correct/test_size) + ')')
+        
+    return model
+    
+def train_epochs_simple_rnn(rnn, data, lr=0.005, split=0.9, epochs=10):
+    for epoch in range(1,epochs+1):
+        print("EPOCH", epoch)
+        ''' Per epoch, splits into train/test, trains on all training data '''
+        indices = np.arange(len(data))
+        np.random.shuffle(indices)
+        train_size = int(len(data)*split)
+        train_set = indices[:train_size]
+        test_set = indices[train_size:]
+        
+        ''' Training steps '''
+        print('Training...')
+        rnn.train()
+        current_loss = 0.0; count = 1
+        for i in train_set:
+            seq, prom = data[i] 
+            output, loss = train_simple_rnn(rnn, seq, prom, lr)
+            current_loss += loss
+            if count % 50 == 0:
+                print('Trained', count, 'of', str(train_size)+'.', 
+                      'Average Loss:', current_loss.item() / count)
+            count += 1
+            
+        ''' Test steps '''
+        print('Testing...')
+        rnn.eval()
+        correct = 0; test_size = len(data) - train_size
+        for i in test_set:
+            rnn.zero_grad()
+            seq, prom = data[i]
+            hidden = rnn.init_hidden()
+            seq_tensor = sequence_to_tensor(seq)
+            for j in range(len(seq)):
+                output, hidden = rnn(seq_tensor[j], hidden)
+            prom_predict = output.max(1)[1].item()
+            correct += (int(prom) == prom_predict)
+        print('Accuracy:', correct, 'of', test_size, 
+              '(' + str(correct/test_size) + ')')
+    return rnn
+        
+def train_simple_rnn(rnn, sequence, is_promiscuous, lr=0.005):
+    ''' Single training step for RNN, uses NLL loss '''
     rnn.zero_grad()
-    seq_tensor = Variable(sequence_to_tensor(sequence))
-    prom_tensor = Variable(torch.LongTensor([int(is_promiscuous)]))
-    hidden = Variable(rnn.init_hidden())
-    
+    seq_tensor = sequence_to_tensor(sequence)
+    hidden = rnn.init_hidden()
     for i in range(seq_tensor.size()[0]): # run sequence through RNN
-        output, hidden = rnn(seq_tensor[i], hidden)    
-    loss = criterion(output, prom_tensor) # update loss function and gradient
-    loss.backward()    
+        output, hidden = rnn(seq_tensor[i], hidden)
+    prom_tensor = torch.LongTensor([int(is_promiscuous)])
+    loss = nn.functional.nll_loss(output, prom_tensor) # update loss function and gradient
+    loss.backward() 
     for p in rnn.parameters(): # update parameters
         p.data.add_(-lr, p.grad.data)
     return output, loss
@@ -98,7 +158,7 @@ def sequence_to_tensor(sequence):
     return seq_tensor
 
 def load_enzyme_sequences_and_promiscuity(gene_groups_file=GENE_GROUPS_FILE,
-                                          seq_file=SEQ_FILE):
+                                          seq_file=SEQ_FILE, len_limit=1000):
     ''' Load amino acid sequences '''
     sequence = ""; gene = None
     gene_sequences = {}
@@ -126,10 +186,28 @@ def load_enzyme_sequences_and_promiscuity(gene_groups_file=GENE_GROUPS_FILE,
         try:
             for gene in gene_group:
                 sequence += gene_sequences[gene]
-            enzyme_data[gene_group] = (sequence, promiscuity)
+            if len(sequence) <= len_limit:
+                enzyme_data[gene_group] = (sequence, promiscuity)
         except KeyError:
             print(gene_group, 'has unknown gene', gene)
     return enzyme_data
+
+class BinaryLSTM(nn.Module):
+    def __init__(self, input_size, hidden_size):
+        ''' Single cell LSTM with hidden_size dimension for LSTM output,
+            which is then passed to a linear layer and reduced to 2 outputs '''
+        super(BinaryLSTM, self).__init__()
+        self.hidden_size = hidden_size
+        self.lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size, num_layers=1)
+        self.fc = nn.Linear(in_features=hidden_size, out_features=2)
+        self.softmax = nn.LogSoftmax(dim=1)
+        
+    def forward(self, x):
+        output, hidden = self.lstm(x)
+        output = output[-1].view(1,1,self.hidden_size) # last output
+        output = self.fc(output).view(1,2)
+        output = self.softmax(output)
+        return output, hidden
 
 class SimpleRNN(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
