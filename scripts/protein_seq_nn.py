@@ -192,6 +192,38 @@ def load_enzyme_sequences_and_promiscuity(gene_groups_file=GENE_GROUPS_FILE,
             print(gene_group, 'has unknown gene', gene)
     return enzyme_data
 
+def annotate_metabolites(gene_group_file='../data/gene_groups_with_cath.csv', 
+                         model_file='../data/iML1515.json',
+                         out_file='../data/gene_groups_no_transport_extended.csv'):
+    ''' Annotates the gene group/enzyme file with known substrates 
+        and products according to the provided metabolic model. '''
+    import cobra.io
+    model = cobra.io.load_json_model(model_file)
+    df = pd.read_csv(gene_group_file)
+    rows, cols = df.shape
+    substrates = []; products = []
+    
+    for i in range(rows):
+        reactionIDs = df.loc[i]['associated_reactions'].split(';')
+        enzyme_substrates = set(); enzyme_products = set()
+        for rxnID in reactionIDs:
+            rxn = model.reactions.get_by_id(rxnID)
+            is_reversible = rxn.reversibility
+            for met in rxn.metabolites:
+                if rxn.metabolites[met] < 0 or is_reversible: # substrate
+                    enzyme_substrates.add(met.id)
+                if rxn.metabolites[met] > 0 or is_reversible: # product
+                    enzyme_products.add(met.id)
+        enzyme_substrates = ';'.join(enzyme_substrates)
+        enzyme_products = ';'.join(enzyme_products)
+        substrates.append(enzyme_substrates)
+        products.append(enzyme_products)
+    df['substrates'] = substrates
+    df['products'] = products
+    df = df.rename({'Unnamed: 0':''}, axis='columns')
+    df.to_csv(out_file, sep=',', index=0)
+    return df
+
 class BinaryLSTM(nn.Module):
     def __init__(self, input_size, hidden_size):
         ''' Single cell LSTM with hidden_size dimension for LSTM output,
