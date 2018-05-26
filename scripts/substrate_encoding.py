@@ -11,12 +11,23 @@ from rdkit.Chem.rdmolfiles import MolFromMolBlock
 from rdkit.Chem.Fingerprints.FingerprintMols import FingerprintsFromMols
 
 def main():
-    fingerprint_metabolites(bits=2048, output_file='../data/fingerprints2048.csv')
-    fingerprint_metabolites(bits=1024, output_file='../data/fingerprints1024.csv')
-    fingerprint_metabolites(bits=512, output_file='../data/fingerprints512.csv')
+    ''' Generate very high-dimension hashing to identify non-resolvable
+        clashes in hashing (for instance, fingerprinting cannot distinguish
+        between different stereoisomers, or metal ion binding) '''
+    print('FINDING UNRESOLVABLE FINGERPRINT CLASHES...')
+    fp, allowable_clashes = fingerprint_metabolites(bits=8192, output_file=None)
+    
+    ''' Test a smaller, more reasonable fingerprinting strategy '''
+    print('TESTING FINGERPRINTING STRATEGY...')
+    fp, clashes = fingerprint_metabolites(bits=1024, bitsPerHash=1,
+                        allowable_clashes=allowable_clashes,
+                        output_file='../data/fingerprinting/fingerprints.csv')
 
-def fingerprint_metabolites(mol_dir='../data/mol_files', bits=2048,
-                            output_file='../data/fingerprints2048.csv'):
+def fingerprint_metabolites(mol_dir='../data/mol_files', 
+                            output_file='../data/fingerprinting/fingerprints.csv',
+                            allowable_clashes=[],
+                            minPath=1, maxPath=7, bits=2048, bitsPerHash=2,
+                            useHs=True, minSize=128):
     ''' Generates a fixed-length encoding of metabolites using RDKFingerprint '''
     mol_files = [f for f in os.listdir(mol_dir) if os.path.isfile(os.path.join(mol_dir, f))]
     mol_data = []
@@ -39,9 +50,27 @@ def fingerprint_metabolites(mol_dir='../data/mol_files', bits=2048,
         Requires these parameters to explicitly specified. All but fpSize are 
         set to their default values. '''
     print("Generating fingerprints of length", bits)
-    fps = FingerprintsFromMols(mol_data, reportFreq=100, fpSize=bits,
-                               minPath=1, maxPath=7, bitsPerHash=2, useHs=True, 
-                               tgtDensity=0, minSize=128)
+    fps = FingerprintsFromMols(mol_data, reportFreq=1000, fpSize=bits,
+                               minPath=minPath, maxPath=maxPath, 
+                               bitsPerHash=bitsPerHash, useHs=useHs, 
+                               tgtDensity=0, minSize=minSize)
+    
+    ''' Examine hash uniqueness '''
+    unique_hashes = {}
+    for bigg, fp in fps:
+        bitstring = fp.ToBitString()
+        if not bitstring in unique_hashes:
+            unique_hashes[bitstring] = []
+        unique_hashes[bitstring].append(bigg)
+    print('Number of metabolites hashed:', len(fps))
+    print('Number of unique hashes:', len(unique_hashes))
+    clashes = []
+    for bitstring in unique_hashes:
+        hash_group = tuple(sorted(unique_hashes[bitstring]))
+        if len(hash_group) > 1: # duplicate hashes
+            clashes.append(hash_group)
+            if not hash_group in allowable_clashes:
+                print('Clash:', ';'.join(hash_group))
     
     ''' Write to file if output path is provided '''
     if output_file:
@@ -50,7 +79,7 @@ def fingerprint_metabolites(mol_dir='../data/mol_files', bits=2048,
         for bigg, fp in fps:
             f.write(bigg + ',' + fp.ToBitString() + '\n')
         f.close()
-    return fps
+    return fps, clashes
 
 def annotate_metabolites(gene_group_file='../data/gene_groups_with_cath.csv', 
                          model_file='../data/iML1515.json',
