@@ -11,7 +11,6 @@ import pandas as pd
 import torch
 import torch.optim as optim
 import torch.nn as nn
-torch.set_num_threads(1)
 
 ''' Basic RNN architecture taken from: 
     https://pytorch.org/tutorials/intermediate/char_rnn_classification_tutorial.html '''
@@ -23,65 +22,72 @@ GENE_GROUPS_FILE = '../data/gene_groups_no_transport.csv'
 AA_CODES = 'GALMFWKQESPVCIYHRNDT'
 
 def main():
+#    sequence_to_fuzzy_tensors('MKVKVLSLLVPALLVAGAANAAEVYNKDGNKLDLYGKVDGLHYFSDNKDVDGDQTYMRLG')
     ''' Load sequences. Limit maximum sequence length for performance issues '''
-    enzyme_data = load_enzyme_sequences_and_promiscuity(len_limit=800)
+    enzyme_data = load_enzyme_sequences_and_promiscuity(len_limit=720)
     enzyme_data = list(enzyme_data.values())
     print('Loaded sequences for', len(enzyme_data), 'enzymes.')
     
     ''' Pytorch built in RNNs, set length limit to <= 800 '''
     model = nn.LSTM(input_size=len(AA_CODES), hidden_size=2, num_layers=1)
 #    model = BinaryLSTM(input_size=len(AA_CODES), hidden_size=5)
-    train_epochs_lstm(model, enzyme_data, split=0.9, epochs=10)
-    name = 'LSTM_H2_E10'
+    train_epochs_lstm(model, enzyme_data, resolution=5, split=0.9, epochs=10)
+    name = 'LSTM_H2_E10_R5'
     torch.save(model.state_dict(), '../torch_models/'+name)
     
-def train_epochs_lstm(model, data, lr=0.05, split=0.9, epochs=10):
+def train_epochs_lstm(model, data, resolution=3, lr=0.05, split=0.9, epochs=10):
     optimizer = optim.Adam(model.parameters(),lr=lr)
     for epoch in range(1,epochs+1):
         print("EPOCH", epoch)
         ''' Per epoch, splits into train/test, trains on all training data '''
         indices = np.arange(len(data))
         np.random.shuffle(indices)
-        train_size = int(len(data)*split)
-        train_set = indices[:train_size]
-        test_set = indices[train_size:]
+        train_enzyme_size = int(len(data)*split) # number of enzymes
+        test_enzyme_size = len(data) - train_enzyme_size
+        train_size = train_enzyme_size * resolution # number of generated data points
+        test_size = test_enzyme_size * resolution
+        train_set = indices[:train_enzyme_size]
+        test_set = indices[train_enzyme_size:]
         
         ''' Training steps '''
         print('Training...'); model.train()
         current_loss = 0.0; count = 1
-        
         for i in train_set:
             seq, prom = data[i] 
-            seq_tensor = sequence_to_tensor(seq)
-            output, hidden = model(seq_tensor)
-                
-            optimizer.zero_grad()
             prom_tensor = torch.LongTensor([int(prom)])
-            last_output = output[-1] # for nn.LSTM
-#            last_output = output # for BinaryLSTM
-#            loss = nn.functional.nll_loss(last_output, prom_tensor) # NLL loss is negative? bug
-            loss = nn.functional.cross_entropy(last_output, prom_tensor)
-            loss.backward()
-            current_loss += loss
-            optimizer.step()
-            
-            if count % 50 == 0:
-                print('Trained', count, 'of', str(train_size)+'.', 
-                      'Average Loss:', current_loss.item() / count)
-            count += 1
+            for seq_tensor in sequence_to_fuzzy_tensors(seq, resolution=resolution, normalize=True):
+                optimizer.zero_grad()
+                output, hidden = model(seq_tensor)
+                last_output = output[-1] # for nn.LSTM
+#                last_output = output # for BinaryLSTM
+#                loss = nn.functional.nll_loss(last_output, prom_tensor) # NLL loss is negative? bug
+                loss = nn.functional.cross_entropy(last_output, prom_tensor)
+                loss.backward()
+                current_loss += loss
+                optimizer.step()
+                if count % 50 == 0:
+                    print('Trained', count, 'of', str(train_size)+'.', 
+                          'Average Loss:', current_loss.item() / count)
+                count += 1
             
         ''' Test steps '''
         print('Testing...'); model.eval()
-        correct = 0; test_size = len(data) - train_size
+        correct = 0; actual_correct = 0
         for i in test_set:
             seq, prom = data[i]
-            seq_tensor = sequence_to_tensor(seq)
-            output, hidden = model(seq_tensor)
-            prom_predict = output[-1].max(1)[1].item() # for nn.LSTM
-#            prom_predict = output.max(1)[1].item() # for BinaryLSTM
-            correct += (int(prom) == prom_predict)
+            fuzzy_predictions = [0,0] # predictions for each window
+            for seq_tensor in sequence_to_fuzzy_tensors(seq, resolution=resolution, normalize=True):
+                output, hidden = model(seq_tensor)
+                prom_predict = output[-1].max(1)[1].item() # for nn.LSTM
+#               prom_predict = output.max(1)[1].item() # for BinaryLSTM
+                correct += (int(prom) == prom_predict)
+                fuzzy_predictions[prom_predict] += 1
+            if fuzzy_predictions[int(prom)] > fuzzy_predictions[1-int(prom)]: # consensus prediction
+                actual_correct += 1
         print('Accuracy:', correct, 'of', test_size, 
               '(' + str(correct/test_size) + ')')
+        print('Consensus Accuracy:', actual_correct, 'of', test_enzyme_size, 
+              '(' + str(actual_correct/test_enzyme_size) + ')')
         
     return model
     
@@ -93,6 +99,25 @@ def sequence_to_tensor(sequence):
         a = AA_CODES.find(sequence[i])
         seq_tensor[i,0,a] = 1
     return seq_tensor
+
+def sequence_to_fuzzy_tensors(sequence, resolution=3, normalize=True):
+    ''' Converts sequence to a set of "fuzzy" one-hot pytorch tensors '''
+    n = len(sequence); seq_tensors = []
+    for i in range(resolution):
+        num_windows = int(np.floor((n - i) / resolution))
+        ohe_array = np.zeros((num_windows, len(AA_CODES)), dtype=np.float)
+        for j in range(num_windows):
+            window = sequence[i+j*resolution:i+(j+1)*resolution]
+            for aa in list(window):
+                ind = AA_CODES.find(aa)
+                ohe_array[j,ind] += 1
+        if normalize: # row euclidean norms to 1
+            row_sums = np.linalg.norm(ohe_array, axis=1)
+            ohe_array = ohe_array / row_sums[:, np.newaxis]
+        seq_tensor = torch.from_numpy(ohe_array).float()
+        seq_tensor = seq_tensor.view(num_windows,1,len(AA_CODES))
+        seq_tensors.append(seq_tensor)
+    return seq_tensors
 
 def load_enzyme_sequences_and_promiscuity(gene_groups_file=GENE_GROUPS_FILE,
                                           seq_file=SEQ_FILE, len_limit=1000):
