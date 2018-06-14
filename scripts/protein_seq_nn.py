@@ -6,7 +6,9 @@ Created on Tue May 22 16:03:54 2018
 @author: jhyun95
 """
 
+import sys, datetime
 import numpy as np
+import matplotlib.pyplot as plt
 import pandas as pd
 import torch
 import torch.optim as optim
@@ -22,33 +24,61 @@ GENE_GROUPS_FILE = '../data/gene_groups_no_transport.csv'
 AA_CODES = 'GALMFWKQESPVCIYHRNDT'
 
 def main():
-#    sequence_to_fuzzy_tensors('MKVKVLSLLVPALLVAGAANAAEVYNKDGNKLDLYGKVDGLHYFSDNKDVDGDQTYMRLG')
-    ''' Load sequences. Limit maximum sequence length for performance issues '''
-    enzyme_data = load_enzyme_sequences_and_promiscuity(len_limit=720)
-    enzyme_data = list(enzyme_data.values())
-    print('Loaded sequences for', len(enzyme_data), 'enzymes.')
+    ''' Initialize working directory and log '''
+    log_file = '../data/lstm_log.txt'
     
-    ''' Pytorch built in RNNs, set length limit to <= 800 '''
-    model = nn.LSTM(input_size=len(AA_CODES), hidden_size=2, num_layers=1)
-#    model = BinaryLSTM(input_size=len(AA_CODES), hidden_size=5)
-    train_epochs_lstm(model, enzyme_data, resolution=5, split=0.9, epochs=10)
-    name = 'LSTM_H2_E10_R5'
-    torch.save(model.state_dict(), '../torch_models/'+name)
+    ''' Print to console and log file '''
+    with LoggingPrinter(log_file):
+        print('------ BEGIN LOG:', datetime.datetime.now(), '-----------------------------------')
+        ''' Load sequences. Limit maximum sequence length for performance issues '''
+        enzyme_data = load_enzyme_sequences_and_promiscuity(len_limit=720)
+        enzyme_data = list(enzyme_data.values())
+        print('Loaded sequences for', len(enzyme_data), 'enzymes.')
+        
+        ''' Pytorch built in RNNs, set length limit to <= 800 '''
+    #    model = nn.LSTM(input_size=len(AA_CODES), hidden_size=2, num_layers=1)
+        HIDDEN_SIZE = 10 # hidden state size
+        RESOLUTION = 6 # sequence resolution
+        EPOCHS = 10 # training epochs
+        name = 'LSTM_H' + str(HIDDEN_SIZE) + '_R' + str(RESOLUTION) + '_E' + str(EPOCHS)
+        print('MODEL:', name)
+        model = BinaryLSTM(input_size=len(AA_CODES), hidden_size=HIDDEN_SIZE)
+        model = train_epochs_lstm(model, enzyme_data, resolution=RESOLUTION, split=0.9, epochs=EPOCHS)
+        torch.save(model.state_dict(), '../torch_models/'+name)
+        
+def plot_performance_from_log(log_file='../data/lstm_log.txt'):
+    ''' Plots validation accuracy vs. epoch for LSTMs, extracted from log file '''
+    raw_values = []
+    for line in open(log_file, 'r+'):
+        if "Consensus" in line:
+            value = float( line.split('(')[-1][:-2] )
+            raw_values.append(value)
+    num_epochs = 10; num_res = 6
+    epochs = range(0,1+num_epochs)
+    for resolution in range(1,1+num_res):
+        val_acc = raw_values[resolution*num_res:resolution*num_res+num_epochs]
+        val_acc = [0] + val_acc
+        plt.plot(epochs, val_acc, label='Window='+str(resolution))
+        print(resolution, max(val_acc))
+    plt.legend()
+    plt.xlabel('Epoch')
+    plt.ylabel('Validation Accuracy')
+    plt.title('Protein-Sequence LSTM: Performance vs. Epoch')
     
-def train_epochs_lstm(model, data, resolution=3, lr=0.05, split=0.9, epochs=10):
+def train_epochs_lstm(model, data, resolution=3, lr=0.01, split=0.9, epochs=10):
     optimizer = optim.Adam(model.parameters(),lr=lr)
+    ''' Split into train/test sets '''
+    indices = np.arange(len(data))
+    np.random.shuffle(indices)
+    train_enzyme_size = int(len(data)*split) # number of enzymes
+    test_enzyme_size = len(data) - train_enzyme_size
+    train_size = train_enzyme_size * resolution # number of generated data points
+    test_size = test_enzyme_size * resolution
+    train_set = indices[:train_enzyme_size]
+    test_set = indices[train_enzyme_size:]
+    
     for epoch in range(1,epochs+1):
         print("EPOCH", epoch)
-        ''' Per epoch, splits into train/test, trains on all training data '''
-        indices = np.arange(len(data))
-        np.random.shuffle(indices)
-        train_enzyme_size = int(len(data)*split) # number of enzymes
-        test_enzyme_size = len(data) - train_enzyme_size
-        train_size = train_enzyme_size * resolution # number of generated data points
-        test_size = test_enzyme_size * resolution
-        train_set = indices[:train_enzyme_size]
-        test_set = indices[train_enzyme_size:]
-        
         ''' Training steps '''
         print('Training...'); model.train()
         current_loss = 0.0; count = 1
@@ -58,8 +88,8 @@ def train_epochs_lstm(model, data, resolution=3, lr=0.05, split=0.9, epochs=10):
             for seq_tensor in sequence_to_fuzzy_tensors(seq, resolution=resolution, normalize=True):
                 optimizer.zero_grad()
                 output, hidden = model(seq_tensor)
-                last_output = output[-1] # for nn.LSTM
-#                last_output = output # for BinaryLSTM
+#                last_output = output[-1] # for nn.LSTM
+                last_output = output # for BinaryLSTM
 #                loss = nn.functional.nll_loss(last_output, prom_tensor) # NLL loss is negative? bug
                 loss = nn.functional.cross_entropy(last_output, prom_tensor)
                 loss.backward()
@@ -78,8 +108,8 @@ def train_epochs_lstm(model, data, resolution=3, lr=0.05, split=0.9, epochs=10):
             fuzzy_predictions = [0,0] # predictions for each window
             for seq_tensor in sequence_to_fuzzy_tensors(seq, resolution=resolution, normalize=True):
                 output, hidden = model(seq_tensor)
-                prom_predict = output[-1].max(1)[1].item() # for nn.LSTM
-#               prom_predict = output.max(1)[1].item() # for BinaryLSTM
+#                prom_predict = output[-1].max(1)[1].item() # for nn.LSTM
+                prom_predict = output.max(1)[1].item() # for BinaryLSTM
                 correct += (int(prom) == prom_predict)
                 fuzzy_predictions[prom_predict] += 1
             if fuzzy_predictions[int(prom)] > fuzzy_predictions[1-int(prom)]: # consensus prediction
@@ -170,6 +200,22 @@ class BinaryLSTM(nn.Module):
         output = self.fc(output).view(1,2)
         output = self.softmax(output)
         return output, hidden
+    
+class LoggingPrinter:
+    ''' Used to simultaneously print to file and console '''
+    #https://stackoverflow.com/questions/24204898/python-output-on-both-console-and-file
+    def __init__(self, filename):
+        self.out_file = open(filename, "a+")
+        self.old_stdout = sys.stdout #this object will take over `stdout`'s job
+        sys.stdout = self #executed when the user does a `print`
+    def write(self, text): 
+        self.old_stdout.write(text)
+        self.out_file.write(text)
+    def __enter__(self):  #executed when `with` block begins
+        return self
+    def __exit__(self, type, value, traceback):  #executed when `with` block ends
+        #we don't want to log anymore. Restore the original stdout object.
+        sys.stdout = self.old_stdout
 
 if __name__ == '__main__':
     main()
